@@ -109,14 +109,3 @@ Input clip (B, T, 3, 224, 224)
         └── Concat → FC → Logits → (B, 9)
 ```
 
-## Data Augmentation (GPU)
-
-Training transforms use torchvision v2 for GPU-accelerated augmentation with per-clip consistency:
-
-1. **CPU**: Resize(256) → uint8 tensor
-2. **GPU** (per-clip, shared random params):
-   - ToDtype(float32, scale=True)
-   - RandomResizedCrop(224, scale=(0.7, 1.0))
-   - RandomRotation(±10°)
-   - ColorJitter(brightness=0.2, contrast=0.2)
-   - Normalize
