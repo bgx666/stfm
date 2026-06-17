@@ -54,6 +54,12 @@ data/EchoData/
         └── ...
 ```
 
+The **EV9V** dataset used in this project is publicly available on Hugging Face:
+
+**🔗 [bgx666/EV9V](https://huggingface.co/datasets/bgx666/EV9V)**
+
+> Download and place the extracted data under `./data/EchoData/` following the structure below.
+
 ## Usage
 
 ### Training
