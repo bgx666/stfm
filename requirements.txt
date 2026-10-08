@@ -1,7 +1,9 @@
 torch>=2.0.0
 torchvision>=0.15.0
 numpy
+scipy
 scikit-learn
 Pillow
+opencv-python-headless
 matplotlib
-pyyaml
+PyYAML

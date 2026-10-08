@@ -19,7 +19,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from data_utils.dataloader import EchoSelectdata, EchoSelectSegdata, Echo2DdataTest
+from data_utils.dataloader import EchoSelectdata, EchoSelectSegdata, Echo2DdataTest, Echo2DdataTestFast, Echo2Ddata, Echo3Ddata
 from utils import *
 from losses import *
 from models_enhanced import create_enhanced_stfm
@@ -29,64 +29,72 @@ from models_enhanced import create_enhanced_stfm
         The main function of AI + EchoVideo Prototype Prediction Framework
                                  Python 3
                                pytorch 2.3.0
-                              author: Tao He
-                       Institution: Sichuan University
-                         email: tao_he@scu.edu.cn
+                              author: Anonymous
+                       Institution: Anonymous
+                         email: anonymous@example.com
 """
 ###########################################################################
 
+
 parser = argparse.ArgumentParser(description='PyTorch Classification for EchoVideo')
-parser.add_argument('--model_name',  default='resnet50', type=str)
+parser.add_argument('--model_name',  default='resnet18', type=str)
 parser.add_argument('--epochs', default=100, type=int)
 parser.add_argument('--start_epoch', default=1,  type=int)
 parser.add_argument('-b', '--batch_size', default=64, type=int)
-parser.add_argument('--lr', default=0.0001, type=float )
+parser.add_argument('--lr', default=0.00002, type=float )
 parser.add_argument('--resume',  default='',  type=str )
 parser.add_argument('--weight_decay', default=0.05, type=float )
 parser.add_argument('--save_dir', default='./save', type=str)
 parser.add_argument('--gpu', default='0', type=str)
-parser.add_argument('--patient', default=20, type=int)
+parser.add_argument('--patient', default=10, type=int)
 parser.add_argument('--loss_name', default='reedl_loss', type=str)
 parser.add_argument('--data_path', default='./data/EchoData/', type=str)
-parser.add_argument('--num_workers', default=12, type=int)
-parser.add_argument('--test_flag', default=0, type=int)  # 0 for training and 1 for testing
-parser.add_argument('--n_class', default=9, type=int)
+parser.add_argument('--num_workers', default=12, type=int) 
+parser.add_argument('--test_flag', default=0, type=int)  # 0 for training and 1 for testing 
+parser.add_argument('--n_class', default=9, type=int)   
 # Enhanced STFM parameters
 parser.add_argument('--use_enhanced', default=1, type=int, help='Use Enhanced STFM')
 parser.add_argument('--temporal_hidden', default=512, type=int)
 parser.add_argument('--temporal_layers', default=2, type=int)
-parser.add_argument('--seed', default=666, type=int)
-parser.add_argument('--over_sample', default="0_3_3_4_0_4_3_5_5", type=str) # setting in video-level
+parser.add_argument('--seed', default=666, type=int)   
+parser.add_argument('--over_sample', default="0_3_3_4_0_4_3_5_5", type=str) # setting in video-level   
 
-parser.add_argument('--frameNo', default=32, type=int)
+parser.add_argument('--frameNo', default=32, type=int)  
+parser.add_argument('--fast_eval', default=0, type=int, help='1=lazy val/test loader (load only used frames)')
+parser.add_argument('--prefetch_factor', default=2, type=int, help='DataLoader prefetch_factor (num_workers>0)')
+parser.add_argument('--batched_aug', default=0, type=int, help='1=batched GPU augmentation (per-frame independent)')
 parser.add_argument('--selective', default=1, type=int)  # 1 for True 0 for False
 parser.add_argument('--uncertainty', default=1, type=int) # # 1 for True 0 for False
-parser.add_argument('--subset_size', default=30, type=int)    # None
-parser.add_argument('--clip_length', default=5, type=int)    # None
+parser.add_argument('--subset_size', default=30, type=int)  # 每次采样的子集大小，None表示使用所有帧
+parser.add_argument('--clip_length', default=5, type=int)  # 返回的片段长度，None表示只返回单帧
 parser.add_argument('--clip_interval', default=5, type=int)  # clip sampling interval
 parser.add_argument('--segment_size', default=20, type=int, help='>0 to use segment-level uncertainty (EchoSelectSegdata)')
-parser.add_argument('--test_num_frames', default=10, type=int)
-parser.add_argument('--epsilon', default=0.2, type=float, help='Epsilon-greedy exploration rate for selective sampling (0=full exploitation, 1=full random)')
+parser.add_argument('--test_num_frames', default=10, type=int)  # 测试时等间距选择的帧数
+parser.add_argument('--epsilon', default=0.8, type=float, help='Epsilon-greedy exploration rate for selective sampling (0=full exploitation, 1=full random)')
+parser.add_argument('--eps_warmup_epochs', default=5, type=int, help='Force epsilon=1.0 for the first N epochs (bank warmup); 0 disables')
+parser.add_argument('--cosine_epochs', default=0, type=int, help='Cosine annealing T_max; 0 = epochs - warmup_epochs (default behavior)')
 parser.add_argument('--val_interval', default=1, type=int, help='validation interval')
 parser.add_argument('--save_latest', default=1, type=int, help='Save model_latest.ckpt every epoch')
 parser.add_argument('--eval_phase', default='Test', type=str, choices=['Train', 'Val', 'Test'], help='Dataset split for evaluation')
 parser.add_argument('--lamb2', default=0.8, type=float, help='REEDL lambda2 parameter')
 parser.add_argument('--fixed_center', default=0, type=int, help='Always pick center frame of segment instead of random')
-
+ 
 DEVICE = torch.device("cuda" if True else "cpu")
+
 
 def main(args):
     torch.manual_seed(args.seed)
-    torch.cuda.manual_seed(args.seed)
+    torch.cuda.manual_seed(args.seed)   
     cudnn.benchmark = True
     setgpu(args.gpu)
-
+    
     over_samplestr = args.over_sample.split("_")
     over_sample = [int(i) for i in over_samplestr]
     if len(over_sample)!=args.n_class:
         over_sample = None
 
     ############################ model testing here ###################################
+    # 统一转换为小写，避免大小写问题
     model_name_lower = args.model_name.lower()
     if model_name_lower == 'inception_v3':
         input_size = (299,299)
@@ -99,7 +107,8 @@ def main(args):
     else:
         input_size = (224,224)
 
-    # STFM
+
+    # 使用增强版STFM模型
     if args.use_enhanced:
         logging.info("Using Enhanced STFM model")
         net = create_enhanced_stfm(
@@ -112,9 +121,10 @@ def main(args):
     else:
         from models import STFM
         net = STFM(space_model_name=args.model_name, temporal_model_name="lstm", num_classes=args.n_class)
-
+    
     if args.test_flag:
         net = net.eval()
+        
 
     if args.loss_name == "crossentropy":
         loss = torch.nn.CrossEntropyLoss()
@@ -142,7 +152,7 @@ def main(args):
     mean = [0.485, 0.456, 0.406]
     std = [0.229, 0.224, 0.225]
 
-    # GPU /
+    # GPU 归一化（验证/测试共用）
     val_gpu_norm = v2.Compose([
                     v2.ToDtype(torch.float32, scale=True),
                     v2.Normalize(mean, std),
@@ -156,14 +166,23 @@ def main(args):
                         v2.CenterCrop(224),
                         v2.ToImage(),
         ])
-        test_dataset = Echo2DdataTest(transforms=test_transform,
-                                        phase=args.eval_phase,
-                                        parent_dir=args.data_path)
+        if args.fast_eval:
+            test_dataset = Echo2DdataTestFast(transforms=test_transform,
+                                              phase=args.eval_phase,
+                                              parent_dir=args.data_path,
+                                              test_num_frames=args.test_num_frames,
+                                              clip_length=args.clip_length,
+                                              clip_interval=args.clip_interval)
+        else:
+            test_dataset = Echo2DdataTest(transforms=test_transform, 
+                                            phase=args.eval_phase, 
+                                            parent_dir=args.data_path)
         testloader = DataLoader(test_dataset,
                                 batch_size=1, # must be 1 for testing
                                 shuffle=False,
                                 drop_last =False,
                                 num_workers=args.num_workers,
+                                prefetch_factor=args.prefetch_factor if args.num_workers > 0 else None,
                                 pin_memory=True)
         test(testloader, net, loss, args.n_class, args.clip_length, args.clip_interval, args.test_num_frames, args.lamb2, gpu_norm=val_gpu_norm)
         return
@@ -174,37 +193,64 @@ def main(args):
                     v2.CenterCrop(224),
                     v2.ToImage(),
     ])
-    val_dataset = Echo2DdataTest(transforms=val_transform, phase='Val',
-            parent_dir=args.data_path)
+    if args.fast_eval:
+        val_dataset = Echo2DdataTestFast(transforms=val_transform, phase='Val',
+                parent_dir=args.data_path,
+                test_num_frames=args.test_num_frames,
+                clip_length=args.clip_length,
+                clip_interval=args.clip_interval)
+    else:
+        val_dataset = Echo2DdataTest(transforms=val_transform, phase='Val',
+                parent_dir=args.data_path)
     valloader = DataLoader(val_dataset,
                     batch_size=1,
                     shuffle=False,
                     drop_last =False,
                     num_workers=args.num_workers,
+                    prefetch_factor=args.prefetch_factor if args.num_workers > 0 else None,
                     pin_memory=True)
 
-    # Test dataset ()
+    # Test dataset (训练后自动测试用)
     test_transform = v2.Compose([
                     v2.Resize(256),
                     v2.CenterCrop(224),
                     v2.ToImage(),
     ])
-    test_dataset = Echo2DdataTest(transforms=test_transform,
-                                    phase='Test',
-                                    parent_dir=args.data_path)
+    if args.fast_eval:
+        test_dataset = Echo2DdataTestFast(transforms=test_transform,
+                                          phase='Test',
+                                          parent_dir=args.data_path,
+                                          test_num_frames=args.test_num_frames,
+                                          clip_length=args.clip_length,
+                                          clip_interval=args.clip_interval)
+    else:
+        test_dataset = Echo2DdataTest(transforms=test_transform,
+                                        phase='Test',
+                                        parent_dir=args.data_path)
     testloader = DataLoader(test_dataset,
                             batch_size=1,
                             shuffle=False,
                             drop_last=False,
                             num_workers=args.num_workers,
+                            prefetch_factor=args.prefetch_factor if args.num_workers > 0 else None,
                             pin_memory=True)
 
-    # CPU transform (DataLoader  resize)
+    # CPU transform (DataLoader 中执行：极轻量，只加载和 resize)
     cpu_transform = v2.Compose([
                     v2.Resize(256),
                     v2.ToImage(),                # PIL → uint8 (C, H, W)
     ])
-    # GPU transform clip v2  T
+    # GPU transforms (new protocol, used with --batched_aug 1):
+    #   geometry (RandomResizedCrop + RandomRotation): per-clip, shared across the T
+    #     frames of the same clip, independent across clips (motion preserved)
+    #   photometric (brightness/contrast): per-frame independent jitter
+    gpu_geo = v2.Compose([
+                    v2.ToDtype(torch.float32, scale=True),
+                    v2.RandomResizedCrop(224, scale=(0.7, 1.0), ratio=(1.0, 1.0)),
+                    v2.RandomRotation(degrees=10),
+    ]).to(DEVICE)
+    train_norm = v2.Normalize(mean, std).to(DEVICE)
+    # legacy full pipeline (used with --batched_aug 0): kept unchanged
     gpu_transform = v2.Compose([
                     v2.ToDtype(torch.float32, scale=True),
                     v2.RandomResizedCrop(224, scale=(0.7, 1.0), ratio=(1.0, 1.0)),
@@ -231,6 +277,7 @@ def main(args):
              batch_size=args.batch_size,
              shuffle=True,
              num_workers=args.num_workers,
+             prefetch_factor=args.prefetch_factor if args.num_workers > 0 else None,
              pin_memory=True,
              persistent_workers=True)
 
@@ -253,7 +300,7 @@ def main(args):
     warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer, start_factor=0.1, total_iters=warmup_epochs)
     cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs - warmup_epochs, eta_min=0)
+        optimizer, T_max=(args.cosine_epochs if args.cosine_epochs > 0 else args.epochs - warmup_epochs), eta_min=0)
     schedule = torch.optim.lr_scheduler.SequentialLR(
         optimizer, schedulers=[warmup_scheduler, cosine_scheduler],
         milestones=[warmup_epochs])
@@ -268,14 +315,14 @@ def main(args):
         # init_uncertainty(initloader, net, args.n_class)
         # initloader.dataset.set_init(True)
 
-    # Epoch 1~5: full random exploration; epoch 6+: bank-guided
+    # Bank warmup: force epsilon=1.0 for the first `eps_warmup_epochs` epochs (0=disabled)
     if args.segment_size > 0:
-        if start_epoch <= 5:
+        if start_epoch <= args.eps_warmup_epochs:
             trainloader.dataset.set_epsilon(1.0)
         else:
             trainloader.dataset.set_epsilon(args.epsilon)
 
-    #  batch
+    # 全局累积 batch 统计
     batch_stats = {
         'batch_idx': [],
         'probs_mean': [],
@@ -285,13 +332,14 @@ def main(args):
     }
 
     for epoch in range(start_epoch, args.epochs + 1):
-        if epoch == 6 and args.segment_size > 0:
+        if epoch == args.eps_warmup_epochs + 1 and args.segment_size > 0:
             trainloader.dataset.set_epsilon(args.epsilon)
         cur_acc, break_flag = train(trainloader,
                         valloader, net, loss, epoch, optimizer,
                         args.save_dir,
                         max_acc, args.n_class, bool(args.selective), bool(args.uncertainty),
-                        break_flag, batch_stats, args.lamb2, gpu_transform, val_gpu_norm)
+                        break_flag, batch_stats, args.lamb2, gpu_transform, val_gpu_norm,
+                        gpu_geo, train_norm)
         schedule.step()
         if cur_acc > max_acc:
             max_acc = cur_acc
@@ -317,7 +365,7 @@ def init_uncertainty(initloader, net, n_class, lamb2=0.8):
 
     with torch.no_grad():
         for i, sample in enumerate(initloader):
-            data = sample[0] # batch, image_num, channel, w, h
+            data = sample[0] # batch, image_num, channel, w, h 
             label_ = sample[1]
             data = data.to(DEVICE)
             data = data.view(data.size(0)*data.size(1), data.size(2), data.size(3), data.size(4))
@@ -327,19 +375,20 @@ def init_uncertainty(initloader, net, n_class, lamb2=0.8):
             #probs = torch.softmax(logits,1)
             probs = get_expectedprob(logits, label_, lamb2=lamb2)
             cur_uncertainty = get_uncertainty( logits, n_class, lamb2=lamb2)
-            inthe_bank = probs[range(data.size(0)),label_] + cur_uncertainty.squeeze(1)
+            inthe_bank = probs[range(data.size(0)),label_] + cur_uncertainty.squeeze(1) 
             select_index = sample[2]
             initloader.dataset.init_uncertainty(select_index, inthe_bank.detach().cpu())
 
+
 def log_metrics(targets, preds, prefix='Metrics'):
-    """ metrics"""
+    """计算并打印混淆矩阵等 metrics"""
     acc = skmetrics.accuracy_score(targets, preds)
     macro_recall = skmetrics.recall_score(targets, preds, average='macro')
     micro_recall = skmetrics.recall_score(targets, preds, average='micro')
     macro_f1 = skmetrics.f1_score(targets, preds, average='macro')
     micro_f1 = skmetrics.f1_score(targets, preds, average='micro')
     confusion = skmetrics.confusion_matrix(targets, preds)
-
+    
     logging.info(
         '%s --> Accuracy: [%.6f], Macro F1: [%.6f], Micro F1: [%.6f], Macro Recall [%.6f], Micro Recall [%.6f]'
         % (prefix, acc, macro_f1, micro_f1, macro_recall, micro_recall))
@@ -347,7 +396,30 @@ def log_metrics(targets, preds, prefix='Metrics'):
     logging.info(confusion)
     return acc
 
-def train(trainloader, valloader, net, loss, epoch, optimizer, save_dir, max_acc, n_class, selective, uncertainty, break_flag=0, batch_stats=None, lamb2=0.8, gpu_transform=None, val_gpu_norm=None):
+
+def apply_batched_aug(clip, gpu_geo, train_norm, brightness=0.2, contrast=0.2):
+    """New augmentation protocol (--batched_aug 1).
+
+    Geometry (RandomResizedCrop + RandomRotation): per clip, i.e. one set of random
+    parameters shared by the T frames of the same clip and independently sampled for
+    every clip in the batch (motion is preserved).
+    Photometric (brightness / contrast): independent random factor for every frame.
+    Semantics follow torchvision: brightness multiplies the frame (clamped to [0,1]),
+    then contrast blends the frame with its per-frame grayscale mean.
+    """
+    clip = torch.stack([gpu_geo(clip[b]) for b in range(clip.shape[0])], 0)
+    _B, _T, _C, _H, _W = clip.shape
+    flat = clip.reshape(_B * _T, _C, _H, _W)
+    b_factor = 1.0 + (torch.rand(flat.shape[0], 1, 1, 1, device=flat.device) * 2 - 1) * brightness
+    flat = torch.clamp(flat * b_factor, 0.0, 1.0)
+    gray = flat[:, 0:1] * 0.2989 + flat[:, 1:2] * 0.587 + flat[:, 2:3] * 0.114
+    mean = gray.mean(dim=(1, 2, 3), keepdim=True)
+    c_factor = 1.0 + (torch.rand(flat.shape[0], 1, 1, 1, device=flat.device) * 2 - 1) * contrast
+    flat = flat * c_factor + mean * (1.0 - c_factor)
+    return train_norm(flat.reshape(_B, _T, _C, _H, _W))
+
+
+def train(trainloader, valloader, net, loss, epoch, optimizer, save_dir, max_acc, n_class, selective, uncertainty, break_flag=0, batch_stats=None, lamb2=0.8, gpu_transform=None, val_gpu_norm=None, gpu_geo=None, train_norm=None):
     start_time = time.time()
     net.train()
 
@@ -359,25 +431,31 @@ def train(trainloader, valloader, net, loss, epoch, optimizer, save_dir, max_acc
 
     for i, sample in enumerate(trainloader):
         counter += 1
-        # sampleclip
+        # 根据sample长度判断是否有clip，并解包各个字段
         if len(sample) == 6:  # (center_img, clip_tensor, label, video_idx, frame_idx, clip_indices)
             data, clip, label_, video_idx, frame_idx, clip_indices = sample
             clip = clip.to(DEVICE, non_blocking=True)
             label = label_.to(DEVICE, non_blocking=True)
-            # GPU transform: v2  T
+            # GPU transform: geometry per-clip (shared across T), photometric per-frame
             if gpu_transform is not None:
-                clip = torch.stack([gpu_transform(clip[b]) for b in range(clip.shape[0])], 0)
+                if args.batched_aug:
+                    clip = apply_batched_aug(clip, gpu_geo, train_norm)
+                else:
+                    clip = torch.stack([gpu_transform(clip[b]) for b in range(clip.shape[0])], 0)
                 frame = clip[:, args.clip_length // 2]
                 data = (frame, clip)
             else:
                 data = data.to(DEVICE, non_blocking=True)
                 data = (data, clip)
-        elif len(sample) == 5:    # (center_img, clip_tensor, label, video_idx, frame_idx)
+        elif len(sample) == 5:  # (center_img, clip_tensor, label, video_idx, frame_idx) 旧版本兼容
             data, clip, label_, video_idx, frame_idx = sample
             clip = clip.to(DEVICE, non_blocking=True)
             label = label_.to(DEVICE, non_blocking=True)
             if gpu_transform is not None:
-                clip = torch.stack([gpu_transform(clip[b]) for b in range(clip.shape[0])], 0)
+                if args.batched_aug:
+                    clip = apply_batched_aug(clip, gpu_geo, train_norm)
+                else:
+                    clip = torch.stack([gpu_transform(clip[b]) for b in range(clip.shape[0])], 0)
                 frame = clip[:, args.clip_length // 2]
                 data = (frame, clip)
             clip_indices = None
@@ -388,14 +466,19 @@ def train(trainloader, valloader, net, loss, epoch, optimizer, save_dir, max_acc
             clip_indices = None
 
         optimizer.zero_grad()
-
+        
         if uncertainty:
             y = one_hot_embedding(label_, n_class)
             y = y.to(DEVICE)
             logits = net(data)
-            cur_loss = loss(
-                logits, y.float(), epoch, n_class, 50, DEVICE
-            )
+            if getattr(loss, '__name__', '') == 'reedl_loss':
+                cur_loss = loss(
+                    logits, y.float(), epoch, n_class, 50, DEVICE, lamb2=lamb2
+                )
+            else:
+                cur_loss = loss(
+                    logits, y.float(), epoch, n_class, 50, DEVICE
+                )
         else:
             logits = net(data)
             cur_loss = loss(logits, label)
@@ -404,33 +487,33 @@ def train(trainloader, valloader, net, loss, epoch, optimizer, save_dir, max_acc
         scores, preds = torch.max(logits.data, 1)
         all_preds.append(preds.cpu().numpy())
         all_labels.append(label.cpu().numpy())
-
+        
         if selective:
             probs = get_expectedprob(logits, label_, lamb2=lamb2)
             cur_uncertainty = get_uncertainty(logits, n_class, lamb2=lamb2)
             inthe_bank = 1.0 - cur_uncertainty.squeeze(1)
-
+            
             if args.segment_size > 0:
                 trainloader.dataset.reset_segment_uncertainty(
                     video_idx, frame_idx, inthe_bank.detach().cpu()
                 )
             elif clip_indices is not None:
-                #  EMA  clip
+                # 使用 EMA 更新整个 clip（重复帧按最大权重更新一次）
                 trainloader.dataset.reset_uncertainty_ema(
                     video_idx, clip_indices, inthe_bank.detach().cpu()
                 )
             else:
-                #  clip
+                # 无 clip，使用旧逻辑（只更新中心帧）
                 trainloader.dataset.reset_uncertainty(
                     video_idx, frame_idx, inthe_bank.detach().cpu()
                 )
-
+            
             last_video_idx = int(video_idx[0]) if isinstance(video_idx, torch.Tensor) else video_idx[0]
             last_frame_idx = int(frame_idx[0]) if isinstance(frame_idx, torch.Tensor) else frame_idx[0]
             last_batch_probs = probs[range(label.size(0)), label_].detach().cpu().tolist()
             last_batch_uncertainty = cur_uncertainty.squeeze(1).detach().cpu().tolist()
 
-            #  batch  probs  uncertainty
+            # 统计当前 batch 的 probs 和 uncertainty（全局累积）
             if batch_stats is not None:
                 real_class_probs = probs[range(label.size(0)), label_].detach()
                 global_batch_idx = len(batch_stats['batch_idx']) + 1
@@ -445,12 +528,15 @@ def train(trainloader, valloader, net, loss, epoch, optimizer, save_dir, max_acc
         torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=20.0)
         optimizer.step()
 
+    # 计算训练集预测结果
     all_preds = np.concatenate(all_preds, 0)
     all_labels = np.concatenate(all_labels, 0)
-
+    
     if epoch % args.val_interval == 0:
+        # 验证前输出完整混淆矩阵
         train_acc = log_metrics(all_labels, all_preds, prefix='Train')
     else:
+        # 只计算准确率，不打印混淆矩阵
         train_acc = skmetrics.accuracy_score(all_labels, all_preds)
 
     logging.info(
@@ -512,7 +598,7 @@ def train(trainloader, valloader, net, loss, epoch, optimizer, save_dir, max_acc
                 'args': args
             }, os.path.join(save_dir, 'model_latest.ckpt'))
 
-    #  epoch  batch
+    # 每个 epoch 结束时绘制累积式 batch 统计图（覆盖之前的）
     if selective and batch_stats is not None and len(batch_stats['batch_idx']) > 0:
         fig, axes = plt.subplots(2, 2, figsize=(14, 8))
         fig.suptitle(f'Cumulative Batch Statistics (Epoch {epoch})', fontsize=14)
@@ -550,6 +636,7 @@ def train(trainloader, valloader, net, loss, epoch, optimizer, save_dir, max_acc
 
     return cur_val_acc, break_flag
 
+
 def evaluation(valloader, net, loss, n_class):
     start_time = time.time()
     net.eval()
@@ -561,7 +648,7 @@ def evaluation(valloader, net, loss, n_class):
         for i, sample in enumerate(valloader):
             data = sample[0]
             label = sample[1]
-            b, f, c, w, h = data.size(0), data.size(1), data.size(2), data.size(3), data.size(4)
+            b, f, c, w, h = data.size(0), data.size(1), data.size(2), data.size(3), data.size(4) 
             data = data.view(b*f, c, w, h)
             targets.append(label.numpy())
             data = data.to(DEVICE)
@@ -571,11 +658,12 @@ def evaluation(valloader, net, loss, n_class):
             logits = logits.view(b, f, logits.size(1))
             _, cur_pred = torch.max(torch.sum(logits,1).data, 1)
             preds.append(cur_pred.cpu().numpy())
-
+        
         preds = np.concatenate(preds, 0)
         targets = np.concatenate(targets, 0)
 
         return log_metrics(targets, preds, prefix='Metrics')
+
 
 def test(testloader, net, loss, n_class, clip_length=10, clip_interval=1, num_frames=5, lamb2=0.8, gpu_norm=None):
     start_time = time.time()
@@ -586,26 +674,26 @@ def test(testloader, net, loss, n_class, clip_length=10, clip_interval=1, num_fr
 
     with torch.no_grad():
         for i, sample in enumerate(testloader):
-
-            data = sample[0] # batch, image_num, channel, w, h
+            
+            data = sample[0] # batch, image_num, channel, w, h 
             data = data.to(DEVICE)
             if gpu_norm is not None:
                 data = gpu_norm(data)
             label = sample[1]
             b, image_num, c, w, h = data.size()
-
+            
             targets.append(label.numpy())
-
-            # num_frames
+            
+            # 均匀取num_frames个关键帧索引
             if image_num >= num_frames:
                 key_indices = torch.linspace(0, image_num - 1, num_frames).long()
             else:
-                # num_frames
+                # 如果帧数不足num_frames，重复最后一个帧
                 key_indices = torch.linspace(0, image_num - 1, min(num_frames, image_num)).long()
                 if len(key_indices) < num_frames:
                     key_indices = torch.cat([key_indices, torch.full((num_frames - len(key_indices),), image_num - 1).long()])
-
-            #  clip
+            
+            # 预先计算所有关键帧的 clip 索引
             half_len = (clip_length // 2) * clip_interval
             all_frames = []
             all_clips = []
@@ -626,14 +714,14 @@ def test(testloader, net, loss, n_class, clip_length=10, clip_interval=1, num_fr
                 all_frames.append(data[:, idx, :, :, :])
                 all_clips.append(data[:, clip_idx_list, :, :, :])
 
-            #  batch forward
+            # 单次 batch forward
             frames_batch = torch.cat(all_frames, dim=0)  # (L, C, H, W)
             clips_batch = torch.cat(all_clips, dim=0)    # (L, T, C, H, W)
             output = net((frames_batch, clips_batch))    # (L, n_class)
 
+            # 聚合
             evidence = F.softplus(output)
-            alpha = evidence + lamb2
-            total_alpha = alpha.sum(dim=0, keepdim=True)  # (1, n_class)
+            total_alpha = evidence.sum(dim=0, keepdim=True) + lamb2  # (1, n_class)
             S = total_alpha.sum(dim=1, keepdim=True)
             final_prob = total_alpha / S
 
@@ -659,6 +747,7 @@ def test(testloader, net, loss, n_class, clip_length=10, clip_interval=1, num_fr
 
         return acc
 
+
 if __name__ == '__main__':
     global args
     args = parser.parse_args()
@@ -677,4 +766,5 @@ if __name__ == '__main__':
     console.setLevel(logging.INFO)
     logging.getLogger().addHandler(console)
     main(args)
+    
 

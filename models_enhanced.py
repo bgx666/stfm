@@ -1,11 +1,16 @@
+# Enhanced STFM Model for Echocardiogram Video Classification
+# Author: Modified based on original work
+# Note: SE module removed due to suboptimal performance on flattened embeddings
+# Last modified: Testing git diff tracking
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
 
+
 class BasicBlock(nn.Module):
-    """ BasicBlock"""
+    """原有代码中的 BasicBlock"""
     def __init__(self, inplanes, planes, stride=1):
         super().__init__()
         self.conv1 = nn.Conv2d(
@@ -38,11 +43,12 @@ class BasicBlock(nn.Module):
         out = self.relu(out)
         return out
 
+
 class SharedBackbone(nn.Module):
     """
-     Stem
-    CNN :  conv1~maxpool / features[0]
-    ViT / EfficientNet : Identity stem
+    共享主干：仅 Stem（最开始的卷积层）
+    CNN 类: 提取 conv1~maxpool / features[0]
+    ViT / EfficientNet 类: Identity（无共享 stem）
     """
     def __init__(self, backbone='resnet50'):
         super().__init__()
@@ -61,10 +67,11 @@ class SharedBackbone(nn.Module):
             resnet = models.resnet50(weights='DEFAULT')
             self.stem = nn.Sequential(
                 resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool,
-                resnet.layer1,
+                resnet.layer1,         
             )
+            # 冻结共享主干（只用于特征提取，不参与训练）
 
-            self.output_channels = 256     # layer1  256ch
+            self.output_channels = 256   # layer1 输出 256ch
             self.output_stride = 4
         elif self.backbone.startswith('convnext_'):
             convnext_cls = getattr(models, f'convnext_{self.backbone.split("_")[1]}')
@@ -117,11 +124,12 @@ class SharedBackbone(nn.Module):
         x = self.stem(x)
         return x
 
+
 class SpatialHead(nn.Module):
     """
-     Head ResNet / ConvNeXt / ViT / EfficientNet
-    CNN :  stages + avgpool + fc
-    ViT / EfficientNet :  head
+    空间流 Head：支持 ResNet / ConvNeXt / ViT / EfficientNet 系列
+    CNN 类: 使用后续 stages + avgpool + fc
+    ViT / EfficientNet 类: 使用完整模型并替换 head
     """
     def __init__(self, backbone='resnet50', embed_dims=128):
         super().__init__()
@@ -131,7 +139,7 @@ class SpatialHead(nn.Module):
         if self.backbone == 'resnet18':
             resnet = models.resnet18(weights='DEFAULT')
             self.features = nn.Sequential(
-                resnet.layer2,      # 64 -> 128 (layer1 )
+                resnet.layer2,    # 64 -> 128 (layer1 已共享冻结)
                 resnet.layer3,    # 128 -> 256
                 resnet.layer4,    # 256 -> 512
             )
@@ -141,7 +149,7 @@ class SpatialHead(nn.Module):
         elif self.backbone == 'resnet50':
             resnet = models.resnet50(weights='DEFAULT')
             self.features = nn.Sequential(
-                resnet.layer2,      # 256 -> 512 ( layer2 layer1 )
+                resnet.layer2,    # 256 -> 512 (从 layer2 开始，layer1 已共享)
                 resnet.layer3,    # 512 -> 1024
                 resnet.layer4,    # 1024 -> 2048
             )
@@ -264,9 +272,10 @@ class SpatialHead(nn.Module):
         x = self.fc(x)
         return x
 
+
 class TemporalHead(nn.Module):
     """
-     Head +
+    时间流 Head：大卷积核 + 早期下采样
     proj: 5x5 stride=2, block1: 5x5 stride=2, block2: 3x3 stride=2
     """
     def __init__(self, in_channels=64, hidden_size=512, num_layers=2, embed_dims=128):
@@ -341,7 +350,7 @@ class TemporalHead(nn.Module):
 
 class EnhancedSTFM(nn.Module):
     """
-     STFM ResNet / ConvNeXt / ViT / EfficientNet
+    增强版 STFM：支持 ResNet / ConvNeXt / ViT / EfficientNet 系列
     """
     def __init__(self, num_classes=9, embed_dims=128,
                  hidden_size=512, num_layers=2,
@@ -351,10 +360,13 @@ class EnhancedSTFM(nn.Module):
         self.backbone = backbone.lower()
         self.embed_dims = embed_dims
 
+        # 共享主干
         self.shared_backbone = SharedBackbone(backbone)
 
+        # 空间流
         self.space_model = SpatialHead(backbone, embed_dims=embed_dims)
 
+        # 时间流
         temporal_in_channels = self.shared_backbone.output_channels
         self.temporal_model = TemporalHead(
             in_channels=temporal_in_channels,
@@ -363,7 +375,7 @@ class EnhancedSTFM(nn.Module):
             embed_dims=embed_dims
         )
 
-        # Concat →
+        # 融合：Concat → 分类
         self.classifier = nn.Sequential(
             nn.Dropout(0.5),
             nn.Linear(embed_dims * 2, embed_dims),   # 256 -> 128
@@ -396,28 +408,31 @@ class EnhancedSTFM(nn.Module):
         frame, clip = inputs
         B, T = clip.shape[0], clip.shape[1]
 
-        #  clip
+        # 共享主干：处理整个 clip
         clip_flat = clip.reshape(B * T, *clip.shape[2:])
         shared_feats = self.shared_backbone(clip_flat)
         _, C, H, W = shared_feats.shape
         shared_feats = shared_feats.reshape(B, T, C, H, W)
 
+        # 空间流：取中间帧
         center_idx = T // 2
         key_frame_feat = shared_feats[:, center_idx]
         space_embedding = self.space_model(key_frame_feat)
 
+        # 时间流
         temporal_embedding = self.temporal_model(shared_feats)
 
-        # Concat →
+        # 融合：Concat → 分类
         fused = torch.cat([space_embedding, temporal_embedding], dim=1)
         output = self.classifier(fused)
         return output
+
 
 def create_enhanced_stfm(num_classes=9, embed_dims=128,
                          hidden_size=512, num_layers=2,
                          backbone='resnet50', **kwargs):
     """
-     STFM
+    创建增强版 STFM 模型
 
     Args:
         backbone: 'resnet18', 'resnet50', 'convnext_tiny', 'convnext_small',
